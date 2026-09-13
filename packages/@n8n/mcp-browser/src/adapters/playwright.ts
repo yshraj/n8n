@@ -445,11 +445,16 @@ export class PlaywrightAdapter {
 		const locator = await this.resolveLocator(pageId, target);
 		await this.ensureActionable(locator, target, 'editable');
 
-		if (options?.clear) {
-			await locator.clear();
-		}
+		if (options?.mode === 'paste') {
+			// Code editors mangle key-by-key entry: auto-close and auto-indent fire per keystroke.
+			await locator.fill(text);
+		} else {
+			if (options?.clear) {
+				await locator.clear();
+			}
 
-		await locator.pressSequentially(text, { delay: options?.delay });
+			await locator.pressSequentially(text, { delay: options?.delay });
+		}
 
 		if (options?.submit) {
 			await locator.press('Enter');
@@ -675,7 +680,7 @@ export class PlaywrightAdapter {
 	): Promise<{ data: string; pages: number }> {
 		const { page } = await this.ensurePage(pageId);
 		const buffer = await page.pdf({
-			format: (options?.format as 'A4' | 'Letter' | 'Legal') ?? 'A4',
+			format: options?.format ?? 'A4',
 			landscape: options?.landscape,
 		});
 		// Rough page count estimation (PDF doesn't easily expose page count)
@@ -753,7 +758,7 @@ export class PlaywrightAdapter {
 			expires: c.expires,
 			httpOnly: c.httpOnly,
 			secure: c.secure,
-			sameSite: c.sameSite as Cookie['sameSite'],
+			sameSite: c.sameSite,
 		}));
 	}
 

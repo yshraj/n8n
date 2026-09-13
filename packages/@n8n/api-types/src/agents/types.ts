@@ -1,29 +1,28 @@
-import {
-	CHAT_TRIGGER_NODE_TYPE,
-	EXECUTE_WORKFLOW_TRIGGER_NODE_TYPE,
-	FORM_TRIGGER_NODE_TYPE,
-	getChildNodes,
-	MANUAL_TRIGGER_NODE_TYPE,
-	WEBHOOK_NODE_TYPE,
-	type IConnections,
-} from 'n8n-workflow';
-import { z } from 'zod';
+import { EXECUTE_WORKFLOW_TRIGGER_NODE_TYPE, getChildNodes, type IConnections } from 'n8n-workflow';
 
 import type { AgentIntegrationSettings } from './agent-integration.schema';
 import type { AgentJsonConfig } from './agent-json-config.schema';
 
-export const SUPPORTED_WORKFLOW_TOOL_TRIGGERS = [
-	MANUAL_TRIGGER_NODE_TYPE,
-	EXECUTE_WORKFLOW_TRIGGER_NODE_TYPE,
-	CHAT_TRIGGER_NODE_TYPE,
-	FORM_TRIGGER_NODE_TYPE,
-	WEBHOOK_NODE_TYPE,
-] as const;
+export const SUPPORTED_WORKFLOW_TOOL_TRIGGERS = [EXECUTE_WORKFLOW_TRIGGER_NODE_TYPE] as const;
 
-export const INCOMPATIBLE_WORKFLOW_TOOL_BODY_NODE_TYPES = [
-	'n8n-nodes-base.wait',
-	'n8n-nodes-base.form',
-] as const;
+/** Display name of each supported trigger, keyed by node type so a rename is a one-line change. */
+const WORKFLOW_TOOL_TRIGGER_DISPLAY_NAMES: Record<
+	(typeof SUPPORTED_WORKFLOW_TOOL_TRIGGERS)[number],
+	string
+> = {
+	[EXECUTE_WORKFLOW_TRIGGER_NODE_TYPE]: 'When Executed by Another Workflow',
+};
+
+/** Display name of the trigger a workflow tool has to start with, for backend copy. */
+export const WORKFLOW_TOOL_TRIGGER_DISPLAY_NAME =
+	WORKFLOW_TOOL_TRIGGER_DISPLAY_NAMES[EXECUTE_WORKFLOW_TRIGGER_NODE_TYPE];
+
+/**
+ * Body nodes a workflow tool cannot run. The Wait node is absent by design — the
+ * tool hands its suspension off to HITL. The Form node has no such path, needing
+ * an interactive browser session mid-execution.
+ */
+export const INCOMPATIBLE_WORKFLOW_TOOL_BODY_NODE_TYPES = ['n8n-nodes-base.form'] as const;
 
 export const AGENT_WORKFLOW_TRIGGER_TYPE = 'workflow';
 
@@ -118,14 +117,33 @@ export interface ChatIntegrationDescriptor {
 	useNodeToolWhen?: string[];
 }
 
+/**
+ * What one configured channel is doing.
+ *
+ * - `configured` — set up, but its agent is not published, so it must not run.
+ * - `starting`  — should be running; no startup attempt has reported back yet.
+ * - `connected` — running.
+ * - `error`     — the last startup attempt failed; `errorMessage` says why, and
+ *                 it is being retried.
+ */
+export type AgentChannelRuntimeStatus = 'configured' | 'starting' | 'connected' | 'error';
+
 export interface AgentIntegrationStatusEntry {
 	type: string;
 	credentialId?: string;
 	settings?: AgentIntegrationSettings;
+	/** Authoritative per-channel state; prefer this over the response rollup. */
+	status: AgentChannelRuntimeStatus;
+	/** Present only when `status` is `error`. */
+	errorMessage?: string;
 }
 
 export interface AgentIntegrationStatusResponse {
-	status: 'configured' | 'connected' | 'disconnected';
+	/**
+	 * Rollup across `integrations`, for callers that only need one word:
+	 * `disconnected` with none configured, `partial` when the channels disagree.
+	 */
+	status: 'configured' | 'connected' | 'disconnected' | 'partial' | 'error';
 	integrations: AgentIntegrationStatusEntry[];
 }
 
@@ -144,6 +162,15 @@ export interface AgentIntegrationDisconnectWarning {
 	details?: Record<string, string>;
 }
 
+/**
+ * The state a connect left the one channel it touched in. Narrower than the
+ * status rollup: a successful connect either started the channel or persisted it
+ * for a still-unpublished agent, and any other outcome is an error response.
+ */
+export interface AgentIntegrationConnectResponse {
+	status: Extract<AgentChannelRuntimeStatus, 'configured' | 'connected'>;
+}
+
 export interface AgentSkillReference {
 	path: string;
 	content: string;
@@ -157,9 +184,20 @@ export interface AgentSkill {
 	references?: AgentSkillReference[];
 }
 
+export interface AgentConfigResponse {
+	config: AgentJsonConfig;
+	configHash: string;
+}
+
+export interface AgentConfigMutationResponse extends AgentConfigResponse {
+	updatedAt: string;
+	versionId: string | null;
+}
+
 export interface AgentSkillMutationResponse {
 	id: string;
 	skill: AgentSkill;
+	skillHash: string;
 	versionId: string | null;
 }
 
@@ -289,41 +327,28 @@ export interface AgentPersistedMessageContentPart {
 	childTrace?: PersistedChildTrace;
 }
 
+/** Platform user who wrote a turn in a shared integration thread. */
+export interface AgentMessageAuthor {
+	id: string;
+	name: string;
+}
+
 export interface AgentPersistedMessageDto {
 	id: string;
 	role: 'user' | 'assistant' | (string & {});
 	content: AgentPersistedMessageContentPart[];
+	/** Set on user turns that came in through a chat integration. */
+	author?: AgentMessageAuthor;
 	/** Agent-execution turn id when this message was produced from an execution transcript. */
 	executionId?: string;
 	/** Outcome of the execution that produced this message. */
 	executionStatus?: 'running' | 'success' | 'error' | 'cancelled' | 'interrupted';
+	/**
+	 * The recorded run error for a turn that ended in `error` or `interrupted`,
+	 * so history renders the same error bubble the live stream showed.
+	 */
+	executionError?: string;
 }
-
-export const AGENT_BUILDER_DEFAULT_MODEL = 'claude-sonnet-4-6' as const;
-
-export const agentBuilderModeSchema = z.enum(['default', 'custom']);
-export type AgentBuilderMode = z.infer<typeof agentBuilderModeSchema>;
-
-export const agentBuilderAdminSettingsSchema = z.discriminatedUnion('mode', [
-	z.object({ mode: z.literal('default') }),
-	z.object({
-		mode: z.literal('custom'),
-		provider: z.string().min(1),
-		credentialId: z.string().min(1),
-		modelName: z.string().min(1),
-	}),
-]);
-export type AgentBuilderAdminSettings = z.infer<typeof agentBuilderAdminSettingsSchema>;
-
-export const agentBuilderAdminSettingsResponseSchema = z.object({
-	settings: agentBuilderAdminSettingsSchema,
-});
-export type AgentBuilderAdminSettingsResponse = z.infer<
-	typeof agentBuilderAdminSettingsResponseSchema
->;
-
-export const AgentBuilderAdminSettingsUpdateDto = agentBuilderAdminSettingsSchema;
-export type AgentBuilderAdminSettingsUpdateRequest = AgentBuilderAdminSettings;
 
 export interface AgentBuilderOpenSuspension {
 	toolCallId: string;
